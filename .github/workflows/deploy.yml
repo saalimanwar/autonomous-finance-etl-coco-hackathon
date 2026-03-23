@@ -1,0 +1,94 @@
+# .github/workflows/deploy.yml
+#
+# WHY THIS EXISTS:
+#   Every time you push code to GitHub, this workflow automatically
+#   runs and deploys your changes to Snowflake. You never need to
+#   manually copy-paste SQL into Snowsight again.
+#
+# WHAT IT DOES:
+#   On push to main branch:
+#     1. If sql/ files changed  → re-deploys SQL to Snowflake
+#     2. If data/ files changed → re-uploads Excel to Snowflake RAW tables
+#
+# HOW TO SET UP SECRETS (one time):
+#   GitHub → Your Repo → Settings → Secrets and Variables → Actions → New repository secret
+#   Add these 4 secrets:
+#     SNOWFLAKE_ACCOUNT   → your account identifier
+#     SNOWFLAKE_USER      → your username
+#     SNOWFLAKE_PASSWORD  → your password
+#     SNOWFLAKE_ROLE      → SYSADMIN
+
+name: Deploy to Snowflake
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # allows manual trigger from GitHub UI
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy SQL + Data to Snowflake
+
+    steps:
+      # ── Step 1: Get your code ──────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # Need previous commit to detect changed files
+
+      # ── Step 2: Set up Python ──────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── Step 3: Install dependencies ──────────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Step 4: Check which files changed ─────────────────────
+      - name: Detect changed files
+        id: changes
+        run: |
+          git diff --name-only HEAD~1 HEAD > changed_files.txt
+          cat changed_files.txt
+          echo "sql_changed=$(grep -c '^sql/' changed_files.txt || true)" >> $GITHUB_OUTPUT
+          echo "data_changed=$(grep -c '^data/' changed_files.txt || true)" >> $GITHUB_OUTPUT
+
+      # ── Step 5: Deploy SQL changes ─────────────────────────────
+      - name: Deploy SQL to Snowflake
+        if: steps.changes.outputs.sql_changed != '0'
+        env:
+          SNOWFLAKE_ACCOUNT:  ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER:     ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_ROLE:     ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ETL_WH
+          SNOWFLAKE_DATABASE:  FINANCE_ETL_DEMO
+        run: |
+          echo "SQL files changed — deploying..."
+          python scripts/deploy_sql.py
+
+      # ── Step 6: Reload Excel data if data changed ──────────────
+      - name: Reload Excel data into Snowflake
+        if: steps.changes.outputs.data_changed != '0'
+        env:
+          SNOWFLAKE_ACCOUNT:  ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER:     ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_ROLE:     ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ETL_WH
+          SNOWFLAKE_DATABASE:  FINANCE_ETL_DEMO
+        run: |
+          echo "Data files changed — reloading Excel..."
+          python scripts/load_to_snowflake.py
+
+      # ── Step 7: Confirm deployment ─────────────────────────────
+      - name: Deployment summary
+        run: |
+          echo "✅ Deployment to Snowflake completed successfully"
+          echo "   Repo: ${{ github.repository }}"
+          echo "   Branch: ${{ github.ref_name }}"
+          echo "   Commit: ${{ github.sha }}"
+          echo "   Triggered by: ${{ github.actor }}"
